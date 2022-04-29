@@ -1,0 +1,22 @@
+
+*** These modified files were found in JOE when it aborted on Wed Dec  1 09:37:44 2021
+*** JOE was aborted by UNIX signal 1
+
+*** File '(Unnamed)'
+conexoes.json
+conexoes.json
+conexoes.json
+LOG-2021-11-25 11:44:18.921360.log
+conexoes.json
+conexoes.json
+requirements.txt
+LOG-2021-12-01 09:01:10.954138.log
+LOG-2021-12-01 09:11:43.936591.log
+requirements.txt
+/home/sergio/Arduino/PAINEL_BLAZER/LCD/PAINEL_BLAZER/PAINEL_BLAZER.ino
+
+*** File '* Startup Log *'
+Processing '/etc/joe/joerc'...
+Processing '/etc/joe/ftyperc'...
+Finished processing /etc/joe/ftyperc
+Finished processing /etc/joe/joerc
