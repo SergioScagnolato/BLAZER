@@ -1,5 +1,5 @@
 
-
+// NODEMCU ESP12-E
 // ********* VERSAO PARA OLED *************
 
 
@@ -13,6 +13,14 @@
 // 22/11/2021 - modo 'normal' e 'manutencao'
 // 01/12/2021 - desliga o wifi quando entra em stdby (desabilitado opcao - nao faz diferenca no consumo)
 // 06/12/2021 - temperatura atual, max e min no webserver
+// 23/05/2022 - comunicacao com o arduino que le temperatura e combustivel via serial e esp01
+// 24/05/2022 - controle dos displays do arduino (on / off)
+// 12/07/2022 - mudou o delay na leitura do sensor bio. estava usando millis() e travava. passei pra delay(55)
+// 12/07/2022 - mudou o servidor ntp para 200.186.125.195
+// 20/07/2022 - mudou servico NTP para 200.160.7.186
+// 16/08/2022 - atualizou lib fingerprint de 2.0.4 para 2.1.0
+// 19/08/2022 - mudança no algoritmo de leitura da biometria
+
 
 
 #include <ESP8266WiFi.h>
@@ -38,17 +46,19 @@ const char* password = "soeusei1";
 const byte canal_wifi = 2;
 const byte max_connection=4;
 const char* host_ota = "ESP_Blazer";
-IPAddress local_ip(192, 168, 4, 1);
-IPAddress gateway(192, 168, 4, 1);
-IPAddress subnet(255, 255, 255, 0);
 
-IPAddress ST_IP(192,168,1,96); 
-IPAddress ST_gateway(192,168,1,1); 
-IPAddress ST_subnet(255,255,255,0);
+WiFiClient client;
+const char* host_esp = "192.168.4.110"; // servidor nodemcu
+
+//IPAddress local_ip(192, 168, 1, 2);
+
+//IPAddress ST_IP(192,168,1,96); 
+//IPAddress ST_gateway(192,168,1,1); 
+//IPAddress ST_subnet(255,255,255,0);
 
 IPAddress ip(192, 168, 4, 1);
-//IPAddress gateway(192, 168, 4, 1);
-//IPAddress subnet(255, 255, 255, 0);
+IPAddress gateway(192, 168, 4, 1);
+IPAddress subnet(255, 255, 255, 0);
 
 
 #define MODOWIFI WIFI_PHY_MODE_11B     // maior alcance, 11 Mbps  - celular encontra na pesquisa de redes wifi
@@ -75,6 +85,9 @@ byte TOTAL_WIFI_CONHECIDA=6;
 
 String a_conectar="NENHUM WIFI";
 String a_conectar_senha="NENHUMA SENHA DISPONIVEL";
+String litros="0000" ;
+String temperatura="0000";
+String bateria="0000";
 
 // portas do controlador
 const int RELE_IGNICAO      = D5;
@@ -120,7 +133,8 @@ Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 // Inicializa o display Oled
 SSD1306Wire  display(0x3c, PORTA1_DSP, PORTA2_DSP);
 
-byte acesso,acessoweb=0;
+byte acessoweb=0;
+int acesso=0;
 byte estadoIgnicao=0;
 byte leitorok=1;
 byte porta_travada=0;
@@ -128,7 +142,7 @@ uint8_t p,p1;
 
 int hora,minuto,status_stdy,rpm=0;
 long umsegundo=1000;    
-long intervalo_rpm=250;
+long intervalo_rpm=1000;
 unsigned long previousMillis,previousstd=0;
 float segundo=0;
 int dia,mes,ano=0;
@@ -158,6 +172,8 @@ NTPClient timeClient(ntpUDP, "200.160.7.186", utcOffsetInSeconds);         // a.
 //NTPClient timeClient(ntpUDP, "200.160.0.8", utcOffsetInSeconds);           // a.ntp.br
 //NTPClient timeClient(ntpUDP, "200.189.40.8", utcOffsetInSeconds);          // b.ntp.br
 //NTPClient timeClient(ntpUDP, "200.192.232.8", utcOffsetInSeconds);         // c.ntp.br
+
+//NTPClient timeClient(ntpUDP, "0.pool.ntp.org", utcOffsetInSeconds);       
 
 
 //INICIA MODULO RTC
@@ -350,6 +366,7 @@ display.flipScreenVertically();
 //  WiFi.mode(WIFI_AP_STA);         // AP + ST
 // WiFi.setPhyMode(MODOWIFI);
  WiFi.config(ip, gateway, subnet);
+ WiFi.softAPConfig(ip, ip, IPAddress(255, 255, 255, 0));   // subnet FF FF FF 00
  boolean result=WiFi.softAP(ssid, password,canal_wifi,false,max_connection);  // Inicia HOTspot
 
  if(result==true) {
@@ -381,6 +398,12 @@ display.flipScreenVertically();
  server.on("/tiporelogiobin", tiporelogiobin); 
  server.on("/modonormal", modonormal); 
  server.on("/modomanutencao", modomanutencao); 
+ 
+ // recebe os valores do arduino via wifi do esp01
+ server.on("/update", update_val); 
+ server.on("/check_val", check_val); 
+
+
 
  server.onNotFound(handle_NotFound);
 
@@ -438,9 +461,17 @@ void loop() {
 //  }
 
  //  server.handleClient();  //Handle client requests
+
+ if (leitorok !=1) {
+   display.setFont(ArialMT_Plain_24);
+   display.clear();
+   display.drawString(64, 3, "Leitor nao");
+   display.drawString(57,33, "encontrado");
+   display.display();
+ }
  
  if(leitorok==1 or MODOFUNCIONAMENTO==1) { 
-  if(acesso==0 and acessoweb==0) {
+  if(acesso == 0 and acessoweb==0) {
    digitalWrite(LED_STDBY,LOW);
    display.setFont(ArialMT_Plain_24);
    display.clear();
@@ -448,22 +479,71 @@ void loop() {
    display.drawString(57,33, "Biometria");
    display.display();
 
-   if(MODOFUNCIONAMENTO==0)
+   if(MODOFUNCIONAMENTO==0) {
+    finger.LEDcontrol(true);
     acesso=le_biometria();
-   else
+    if (acesso==-1) {
+      display.clear();
+      display.setFont(ArialMT_Plain_16);
+      display.drawString(60, 17,  "DEDO NAO");
+      display.drawString(60, 42, "POSICIONADO");
+      display.display();
+      delay(1500);
+//      unsigned long start = millis();
+//      while( millis() - start < 2*1000){ // 2 segundos
+//       yield();
+//      }
+      acesso=0;
+     }
+     if (acesso==-2) {
+      display.clear();
+      display.setFont(ArialMT_Plain_16);
+      display.drawString(60, 17, "NAO");
+      display.drawString(60, 42, "AUTORIZADO");
+      display.display();
+      delay(1500);
+//      unsigned long start = millis();
+//      while( millis() - start < 2*1000){ // 2 segundos
+//       yield();
+//      }
+      acesso=0;
+     }
+     if (acesso==-3) {
+      display.clear();
+      display.setFont(ArialMT_Plain_24);
+      display.drawString(57, 29 ,  "LENDO ... ");
+//      display.drawString(60, 42, "IMAGEM");
+      display.display();
+      delay(500);
+//      unsigned long start = millis();
+//      while( millis() - start < 2*1000){ // 2 segundos
+//       yield();
+//      }
+      acesso=0;
+     }
+    
+   } else {
     acesso=1;
-
+   }
   } else {    // cadastro reconhecido
     mostra_hora();
     mostra_temperatura();
    if(estadoIgnicao==0){
     digitalWrite(RELE_IGNICAO,LOW);
     estadoIgnicao=1;
+    // aciona display arduino_esp
+    bool conec_arduino_esp=false;
+    if(client.connect(host_esp,80)) {
+     String url = "/acender_display";
+     bool conect_arduino_esp=true;
+     client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + host_esp +  "\r\n" + 
+                 "Connection: keep-alive\r\n\r\n"); // minimo header http
+    }
    }
- 
   }
  }
-} else {    //  entra no stdby
+ 
+ } else {    //  entra no stdby
   estadoIgnicao=0;
   acesso=0;
   if(status_stdy==0) {
@@ -484,6 +564,16 @@ void loop() {
    display.clear();
    display.display();
    status_stdy=1;
+   
+   // apaga displays arduino
+   bool conec=false;
+   if(client.connect(host_esp,80)) {
+    String url = "/apagar_display";
+    bool conect=true;
+    client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + host_esp +  "\r\n" + 
+                 "Connection: keep-alive\r\n\r\n"); // minimo header http
+   }
+   
   }
 
  int delaypisca=700;
@@ -512,12 +602,11 @@ void loop() {
 }
  
 ArduinoOTA.handle(); 
- delay(10);
-// unsigned long start = millis();
-// while( millis() - start < 10){ // 10 ms
-//  yield();
-// }
+delay(20);
+//finger.LEDcontrol(false);
+//delay(200);
 }
+ 
 
 
 
@@ -890,6 +979,33 @@ void modomanutencao() {
  handleRoot();
 }
 
+void update_val() {
+  litros = server.arg("litros");
+  temperatura=server.arg("temperatura");
+  bateria=server.arg("bateria");
+  server.send(200, "text/plain", "litros = "+litros+", temp = "+temperatura+", bateria = "+bateria);
+}
+
+void check_val() {
+ // faz a requisicao para o esp01
+  bool conec=false;
+  if(client.connect(host_esp,80)) {
+    String url = "/leitura";
+    bool conect=true;
+    client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + host_esp +  "\r\n" + 
+                 "Connection: keep-alive\r\n\r\n"); // minimo header http
+  }
+  delay(75);  
+  char horario_leitura[20];
+  sprintf(horario_leitura,"%02d:%02d:%02.1f",hora,minuto,segundo);
+  String horario1=horario_leitura;
+  if(conec)
+   server.send(200, "text/plain", horario1+" : Combustivel = "+litros+" L - Temp = "+temperatura+" C - Bateria = "+bateria+" V");
+  else
+   server.send(200, "text/plain", horario1+" : SEM CONEXAO AO ESP01 192.168.4.110");
+}
+
+
 
 void handle_NotFound(){
   server.send(404, "text/plain", "Pagina non ecxiste");
@@ -1156,74 +1272,44 @@ float le_temperatura() {
 int le_biometria(void) {
    int permite=0;
    finger.LEDcontrol(true);
-/* 
-  uint8_t p2 = finger.getImage();
-  while(p2 != FINGERPRINT_OK) {
-    if(p2==FINGERPRINT_IMAGEFAIL) {
-      lcd.clear();
-      lcd.setCursor(5,1);
-      lcd.print("DEDO NAO");
-      lcd.setCursor(4,3);
-      lcd.print("POSICIONADO");
-      unsigned long start = millis();
-      while( millis() - start < 2*1000){ // 2 segundos
-       yield();
-      }
-      lcd.clear();
-    }
-  }
-*/
-   p = finger.getImage();
-   if(p==FINGERPRINT_OK) {
-    p1 = finger.image2Tz();
-    while(p1!=FINGERPRINT_OK) {
-     p1 = finger.image2Tz();
-     unsigned long start = millis();
-     while( millis() - start < 100){ // 50 ms
-      yield();
-     }
-    }
-    p1 = finger.fingerSearch();
-    if(p1==FINGERPRINT_NOTFOUND) {    // nao encontrou digital
-     if(DEBUG==1) Serial.println("NAO AUTORIZADO");
-      nao_autorizado();
-      permite=0;
-    }
-    if(p1==FINGERPRINT_IMAGEFAIL) {
-      display.clear();
-      display.setFont(ArialMT_Plain_16);
-      display.drawString(60, 17, "DEDO NAO");
-      display.drawString(60, 42, "POSICIONADO");
-      display.display();
-      unsigned long start = millis();
-      while( millis() - start < 2*1000){ // 2 segundos
-       yield();
-      }
-      permite=0;
-    }
-    
-    if(p1==FINGERPRINT_OK) { 
+   uint8_t p = finger.getImage();
+
+   if (p==FINGERPRINT_NOFINGER) return 0;
+
+   if (p==FINGERPRINT_IMAGEFAIL or p==FINGERPRINT_PACKETRECIEVEERR) return -1;
+   
+   if(p==FINGERPRINT_NOTFOUND) return -2;
+
+   if (p != FINGERPRINT_OK)  return -3;
+ 
+   p = finger.image2Tz();
+   if (p != FINGERPRINT_OK)  return -3;
+ 
+   p = finger.fingerFastSearch();
+   if (p != FINGERPRINT_OK)  return -3;
+
+   if(p==FINGERPRINT_OK) { 
       if(DEBUG==1) Serial.println("ACESSO AUTORIZADO");
       finger.LEDcontrol(false);
       display.clear();
       display.display();
       permite=1;
     }
-   }
  return(permite);
 }
 
-void nao_autorizado() {
-      display.clear();
-      display.setFont(ArialMT_Plain_16);
-      display.drawString(60, 17, "NAO");
-      display.drawString(60, 42, "AUTORIZADO");
-      display.display();
-      unsigned long start = millis();
-      while( millis() - start < 2*1000){ // 2 segundos
-       yield();
-      }
-}
+
+//void nao_autorizado() {
+//      display.clear();
+//      display.setFont(ArialMT_Plain_16);
+//      display.drawString(60, 17, "NAO");
+//      display.drawString(60, 42, "AUTORIZADO");
+//      display.display();
+//      unsigned long start = millis();
+//      while( millis() - start < 2*1000){ // 2 segundos
+//       yield();
+//      }
+//}
 
 /*
 void erro_de_leitura() {
